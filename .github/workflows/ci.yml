@@ -2,21 +2,24 @@ name: CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "develop", "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "develop", "main" ]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  test-build-push-deploy:
+  test-build-push:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
       packages: write
+
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.image_tag }}
 
     steps:
       - name: Checkout repository
@@ -28,12 +31,14 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run tests
-        run: |
-          pytest
+        run: pytest
+
+      - name: Set image tag
+        id: set-tag
+        run: echo "image_tag=${GITHUB_SHA}" >> $GITHUB_OUTPUT
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -41,28 +46,59 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t $REGISTRY/$IMAGE_NAME:latest .
+          docker build \
+            -t $REGISTRY/$IMAGE_NAME:latest \
+            -t $REGISTRY/$IMAGE_NAME:${GITHUB_SHA} \
+            .
 
       - name: Push Docker image
         if: github.event_name != 'pull_request'
         run: |
           docker push $REGISTRY/$IMAGE_NAME:latest
+          docker push $REGISTRY/$IMAGE_NAME:${GITHUB_SHA}
 
-      - name: Deploy to server
-        if: github.event_name != 'pull_request'
+  deploy-staging:
+    if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
+    needs: test-build-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to staging
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          port: ${{ secrets.STAGING_PORT || 22 }}
           script: |
-            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            docker stop hello-cicd || true
-            docker rm hello-cicd || true
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.test-build-push.outputs.image_tag }}
+            docker stop hello-cicd-staging || true
+            docker rm hello-cicd-staging || true
             docker run -d \
-              --name hello-cicd \
+              --name hello-cicd-staging \
+              -p 5001:5000 \
+              --restart unless-stopped \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.test-build-push.outputs.image_tag }}
+
+  deploy-production:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: test-build-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to production
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_PORT || 22 }}
+          script: |
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.test-build-push.outputs.image_tag }}
+            docker stop hello-cicd-prod || true
+            docker rm hello-cicd-prod || true
+            docker run -d \
+              --name hello-cicd-prod \
               -p 5000:5000 \
               --restart unless-stopped \
-              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.test-build-push.outputs.image_tag }}
