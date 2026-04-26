@@ -3,6 +3,8 @@ name: CI/CD
 on:
   push:
     branches: [ "develop", "main" ]
+    tags:
+      - "v*"
   pull_request:
     branches: [ "develop", "main" ]
 
@@ -38,7 +40,7 @@ jobs:
 
       - name: Set image tag
         id: set-tag
-        run: echo "image_tag=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+        run: echo "image_tag=sha-$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_OUTPUT
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -46,16 +48,25 @@ jobs:
 
       - name: Build Docker image
         run: |
+          SHORT_SHA=sha-$(echo ${GITHUB_SHA} | cut -c1-7)
           docker build \
+            -t $REGISTRY/$IMAGE_NAME:$SHORT_SHA \
             -t $REGISTRY/$IMAGE_NAME:latest \
-            -t $REGISTRY/$IMAGE_NAME:${GITHUB_SHA} \
             .
 
-      - name: Push Docker image
+      - name: Push SHA and latest tags
         if: github.event_name != 'pull_request'
         run: |
+          SHORT_SHA=sha-$(echo ${GITHUB_SHA} | cut -c1-7)
+          docker push $REGISTRY/$IMAGE_NAME:$SHORT_SHA
           docker push $REGISTRY/$IMAGE_NAME:latest
-          docker push $REGISTRY/$IMAGE_NAME:${GITHUB_SHA}
+
+      - name: Push git tag as Docker tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION_TAG=${GITHUB_REF#refs/tags/}
+          docker tag $REGISTRY/$IMAGE_NAME:sha-$(echo ${GITHUB_SHA} | cut -c1-7) $REGISTRY/$IMAGE_NAME:$VERSION_TAG
+          docker push $REGISTRY/$IMAGE_NAME:$VERSION_TAG
 
   deploy-staging:
     if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
